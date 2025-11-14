@@ -1,398 +1,325 @@
-// index.js (CommonJS) — для discord.js v14+
-// Убедись, что package.json НЕ содержит "type":"module"
-require('dotenv').config();
+// index.js (ESM)
+// Требует: discord.js v14, @discordjs/rest, discord-api-types, dotenv
+import 'dotenv/config';
+import { Client, GatewayIntentBits, Partials, Events, REST, Routes, SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, EmbedBuilder, ChannelType } from 'discord.js';
+import { REST as RESTv } from '@discordjs/rest';
+import { Routes as API_Routes } from 'discord-api-types/v10';
 
-const { REST } = require('@discordjs/rest');
-const { Routes } = require('discord-api-types/v10');
 const {
-  Client,
-  GatewayIntentBits,
-  Partials,
-  SlashCommandBuilder,
-  EmbedBuilder,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  PermissionFlagsBits,
-  ModalBuilder,
-  TextInputBuilder,
-  TextInputStyle,
-  ChannelType,
-} = require('discord.js');
+  DISCORD_TOKEN,
+  CLIENT_ID,
+  GUILD_ID,
+  APP_CHANNEL_ID,
+  ROLE_IDS,
+  AUDIT_CHANNEL_ID
+} = process.env;
 
-const TOKEN = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID;
-const AUDIT_CHANNEL_ID = process.env.AUDIT_CHANNEL_ID;
-const APP_CHANNEL_ID = process.env.APP_CHANNEL_ID;
-const PING_ROLES = (process.env.PING_ROLES || '').split(',').filter(Boolean);
-
-if (!TOKEN || !CLIENT_ID) {
-  console.error('Нужно задать DISCORD_TOKEN и CLIENT_ID в .env');
+if (!DISCORD_TOKEN || !CLIENT_ID) {
+  console.error('Убедитесь, что DISCORD_TOKEN и CLIENT_ID заданы в .env');
   process.exit(1);
 }
 
-// ----- Команды -----
-const commandsPayload = [
-  new SlashCommandBuilder()
-    .setName('embed')
-    .setDescription('Создать эмбэд (заголовок, текст, цвет, футер)')
-    .addStringOption(opt => opt.setName('title').setDescription('Заголовок').setRequired(true))
-    .addStringOption(opt => opt.setName('description').setDescription('Описание').setRequired(true))
-    .addStringOption(opt => opt.setName('color').setDescription('HEX цвет, напр. #ff66aa').setRequired(false))
-    .addStringOption(opt => opt.setName('footer').setDescription('Футер').setRequired(false))
-    .addBooleanOption(opt => opt.setName('pingroles').setDescription('Пинговать роли из env?').setRequired(false))
-    .toJSON(),
+// helper: parse role ids
+const ROLE_IDS_ARRAY = (ROLE_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
 
-  new SlashCommandBuilder()
-    .setName('audit')
-    .setDescription('Добавить запись в аудит (promotion/demotion/warning/termination)')
-    .addUserOption(o => o.setName('target').setDescription('Кому действие').setRequired(true))
-    .addStringOption(o => o.setName('action').setDescription('Действие').setRequired(true)
-      .addChoices(
-        { name: 'Promotion', value: 'promotion' },
-        { name: 'Demotion', value: 'demotion' },
-        { name: 'Warning', value: 'warning' },
-        { name: 'Termination', value: 'termination' },
-        { name: 'Other', value: 'other' },
-      ))
-    .addStringOption(o => o.setName('from_rank').setDescription('От ранга').setRequired(false)
-      .addChoices(
-        { name:'8 — Generalisimus', value:'8'},{ name:'7 — Vice Gen.', value:'7'},
-        { name:'6 — Gen. Secretary', value:'6'},{ name:'5 — Curator', value:'5'},
-        { name:"4 — Curator's Office", value:'4'},{ name:'3 — Stacked', value:'3'},
-        { name:'2 — Main', value:'2'},{ name:'1 — NewBie', value:'1'}
-      ))
-    .addStringOption(o => o.setName('to_rank').setDescription('До ранга').setRequired(false)
-      .addChoices(
-        { name:'8 — Generalisimus', value:'8'},{ name:'7 — Vice Gen.', value:'7'},
-        { name:'6 — Gen. Secretary', value:'6'},{ name:'5 — Curator', value:'5'},
-        { name:"4 — Curator's Office", value:'4'},{ name:'3 — Stacked', value:'3'},
-        { name:'2 — Main', value:'2'},{ name:'1 — NewBie', value:'1'}
-      ))
-    .addStringOption(o => o.setName('reason').setDescription('Причина').setRequired(false))
-    .addStringOption(o => o.setName('note').setDescription('Заметки').setRequired(false))
-    .toJSON(),
+// создаём клиента
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+  partials: [Partials.Channel]
+});
 
+// --- ОПРЕДЕЛЕНИЕ СЛЕШ-КОМАНД ---
+const commands = [
   new SlashCommandBuilder()
     .setName('apply-panel')
-    .setDescription('Разместить панель заявок (только для админов/менеджеров)')
-    .toJSON()
-];
+    .setDescription('Опубликовать панель заявок (кнопки)'),
+  new SlashCommandBuilder()
+    .setName('embed')
+    .setDescription('Создать эмбэд (Title/Description/Color)')
+    .addStringOption(opt => opt.setName('title').setDescription('Заголовок').setRequired(true))
+    .addStringOption(opt => opt.setName('description').setDescription('Текст').setRequired(true))
+    .addStringOption(opt => opt.setName('color').setDescription('Цвет в hex, например #ff66aa').setRequired(false)),
+  new SlashCommandBuilder()
+    .setName('audit')
+    .setDescription('Логировать действие (повышение/понижение/выговор/увольнение и т.д.)')
+    .addUserOption(o => o.setName('author').setDescription('Кто совершил действие').setRequired(true))
+    .addUserOption(o => o.setName('target').setDescription('Кого это касается').setRequired(true))
+    .addStringOption(o => o.setName('action').setDescription('Действие').setRequired(true)
+      .addChoices(
+        { name: 'Повышение', value: 'promote' },
+        { name: 'Понижение', value: 'demote' },
+        { name: 'Выговор', value: 'warn' },
+        { name: 'Увольнение', value: 'fire' },
+        { name: 'Выдача ранга', value: 'give_rank' }
+      ))
+    .addStringOption(o => o.setName('reason').setDescription('Причина/подробности').setRequired(false))
+    // выбор с/на ранга
+    .addStringOption(o => o.setName('from_rank').setDescription('С какого ранга (если применимо)').setRequired(false)
+      .addChoices(
+        { name: '8 — Generalisimus', value: '8' },
+        { name: '7 — Vice Gen.', value: '7' },
+        { name: '6 — Gen. Secretary', value: '6' },
+        { name: '5 — Curator', value: '5' },
+        { name: '4 — Curator\'s Office', value: '4' },
+        { name: '3 — Stacked', value: '3' },
+        { name: '2 — Main', value: '2' },
+        { name: '1 — NewBie', value: '1' }
+      ))
+    .addStringOption(o => o.setName('to_rank').setDescription('На какой ранг (если применимо)').setRequired(false)
+      .addChoices(
+        { name: '8 — Generalisimus', value: '8' },
+        { name: '7 — Vice Gen.', value: '7' },
+        { name: '6 — Gen. Secretary', value: '6' },
+        { name: '5 — Curator', value: '5' },
+        { name: '4 — Curator\'s Office', value: '4' },
+        { name: '3 — Stacked', value: '3' },
+        { name: '2 — Main', value: '2' },
+        { name: '1 — NewBie', value: '1' }
+      ))
+].map(cmd => cmd.toJSON());
 
-// Регистрация команд
+// регистрируем команды (guild если указан GUILD_ID, иначе глобально)
 (async () => {
   try {
-    const rest = new REST({ version: '10' }).setToken(TOKEN);
+    const rest = new RESTv({ version: '10' }).setToken(DISCORD_TOKEN);
     if (GUILD_ID) {
-      await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commandsPayload });
-      console.log('Slash-команды зарегистрированы в гильдии', GUILD_ID);
+      console.log('Регистрация слэш-команд в гильдии', GUILD_ID);
+      await rest.put(API_Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
     } else {
-      await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commandsPayload });
-      console.log('Slash-команды зарегистрированы глобально (до 1 часа)');
+      console.log('Регистрация глобальных слэш-команд (может занять до часа)');
+      await rest.put(API_Routes.applicationCommands(CLIENT_ID), { body: commands });
     }
-  } catch (e) {
-    console.error('Ошибка регистрации команд:', e);
+    console.log('Слэш-команды зарегистрированы.');
+  } catch (err) {
+    console.error('Ошибка регистрации слэш-команд:', err);
   }
 })();
 
-// ----- Клиент -----
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMembers],
-  partials: [Partials.Channel],
+// ------- HANDLERS -------
+client.once(Events.ClientReady, () => {
+  console.log(`Logged in as ${client.user.tag}`);
 });
 
-client.once('ready', () => {
-  console.log('Logged in as', client.user.tag);
-});
-
-// ----- In-memory audit summary -----
-const auditSummary = new Map();
-function ensureSummary(id){ if(!auditSummary.has(id)) auditSummary.set(id, { promotion:0, demotion:0, warning:0, termination:0 }); return auditSummary.get(id); }
-function rankLabel(v){
-  return { '8':'8 — Generalisimus','7':'7 — Vice Gen.','6':'6 — Gen. Secretary','5':'5 — Curator','4':"4 — Curator's Office",'3':'3 — Stacked','2':'2 — Main','1':'1 — NewBie' }[v]||'—';
-}
-
-// ----- Обработка команд -----
-client.on('interactionCreate', async (interaction) => {
+client.on(Events.InteractionCreate, async (interaction) => {
   try {
+    // --- СЛЕШ-КОМАНДЫ ---
     if (interaction.isChatInputCommand()) {
-      const name = interaction.commandName;
-
-      // ---- EMBED ----
-      if (name === 'embed') {
-        const title = interaction.options.getString('title', true);
-        const desc = interaction.options.getString('description', true);
-        const colorOpt = interaction.options.getString('color', false);
-        const footer = interaction.options.getString('footer', false);
-        const pingroles = interaction.options.getBoolean('pingroles', false);
-
-        let color = 0x57f287;
-        if (colorOpt) {
-          try {
-            if (colorOpt.startsWith('#')) color = parseInt(colorOpt.slice(1), 16);
-            else if (!isNaN(Number(colorOpt))) color = Number(colorOpt);
-          } catch {}
-        }
-
-        const emb = new EmbedBuilder().setTitle(title).setDescription(desc).setColor(color).setTimestamp();
-        if (footer) emb.setFooter({ text: footer });
-
-        await interaction.reply({ content: (pingroles && PING_ROLES.length) ? PING_ROLES.map(id=>`<@&${id}>`).join(' ') : null, embeds: [emb], ephemeral: false });
-        return;
-      }
-
-      // ---- AUDIT ----
-      if (name === 'audit') {
-        // проверка прав: ManageGuild/ManageRoles/Admin
-        const mem = interaction.member;
-        if (!mem.permissions?.has(PermissionFlagsBits.ManageGuild) && !mem.permissions?.has(PermissionFlagsBits.ManageRoles) && !mem.permissions?.has(PermissionFlagsBits.Administrator)) {
-          await interaction.reply({ content: 'У вас нет прав для /audit (требуется ManageGuild/ManageRoles/Administrator).', ephemeral: true });
-          return;
-        }
-
-        const target = interaction.options.getUser('target', true);
-        const action = interaction.options.getString('action', true);
-        const fromRank = interaction.options.getString('from_rank', false);
-        const toRank = interaction.options.getString('to_rank', false);
-        const reason = interaction.options.getString('reason', false);
-        const note = interaction.options.getString('note', false);
-
-        const summ = ensureSummary(target.id);
-        if (action === 'promotion') summ.promotion++;
-        if (action === 'demotion') summ.demotion++;
-        if (action === 'warning') summ.warning++;
-        if (action === 'termination') summ.termination++;
-
-        const actionMap = { promotion:'Promotion (Повышение)', demotion:'Demotion (Понижение)', warning:'Warning (Выговор)', termination:'Termination (Увольнение)', other:'Other' };
-        const emb = new EmbedBuilder()
-          .setTitle('📝 Аудит — запись')
-          .setColor(action === 'promotion' ? 0x57F287 : action === 'demotion' ? 0xED4245 : 0xFAA61A)
-          .addFields(
-            { name: 'Действие', value: actionMap[action]||action, inline: true },
-            { name: 'Кто', value: `${interaction.user.tag} (<@${interaction.user.id}>)`, inline: true },
-            { name: 'Кому', value: `${target.tag} (<@${target.id}>)`, inline: true },
-          )
-          .setTimestamp();
-
-        if (fromRank || toRank) emb.addFields({ name: 'Ранги', value: `От: ${rankLabel(fromRank)}\nДо: ${rankLabel(toRank)}`, inline: false });
-        if (reason) emb.addFields({ name: 'Причина', value: reason, inline: false });
-        if (note) emb.addFields({ name: 'Заметки', value: note, inline: false });
-
-        emb.addFields({ name: 'Статистика (runtime)', value: `📊 Повышения: ${summ.promotion}\n📊 Понижения: ${summ.demotion}\n📊 Выговоры: ${summ.warning}\n📊 Увольнения: ${summ.termination}`, inline: false });
-
-        if (!AUDIT_CHANNEL_ID) {
-          await interaction.reply({ content: 'Ошибка: AUDIT_CHANNEL_ID не задан', ephemeral: true }); return;
-        }
-        const ch = await client.channels.fetch(AUDIT_CHANNEL_ID).catch(()=>null);
-        if (!ch) { await interaction.reply({ content: `Не найден канал аудита ID=${AUDIT_CHANNEL_ID}`, ephemeral: true }); return; }
-
-        await ch.send({ embeds: [emb] });
-        await interaction.reply({ content: 'Запись отправлена в аудит.', ephemeral: true });
-        return;
-      }
-
-      // ---- APPLY PANEL ----
-      if (name === 'apply-panel') {
-        const mem = interaction.member;
-        if (!mem.permissions?.has(PermissionFlagsBits.Administrator) && !mem.permissions?.has(PermissionFlagsBits.ManageGuild)) {
-          await interaction.reply({ content: 'Только админ/менеджер может разместить панель заявок.', ephemeral: true });
+      if (interaction.commandName === 'apply-panel') {
+        // только для модераторов: проверка прав (можешь убрать)
+        if (!interaction.memberPermissions?.has?.('ManageGuild')) {
+          // если не хотите проверку, закомментируйте строку выше и нижнюю ветку
+          await interaction.reply({ content: 'У вас нет прав на публикацию панели.', ephemeral: true });
           return;
         }
 
         const embed = new EmbedBuilder()
           .setTitle('✉️ Панель заявок Versize')
           .setDescription('Выберите нужный тип заявки ниже.')
-          .setColor(0x5865F2);
+          .setColor(0x8e44ad);
 
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('apply_submit').setLabel('Подать заявку в семью').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId('apply_family').setLabel('Подать заявку в семью').setStyle(ButtonStyle.Primary),
           new ButtonBuilder().setCustomId('apply_restore').setLabel('Восстановление').setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder().setCustomId('apply_unblack').setLabel('Снятие ЧС').setStyle(ButtonStyle.Secondary)
+          new ButtonBuilder().setCustomId('apply_unblack').setLabel('Снятие ЧС').setStyle(ButtonStyle.Secondary),
         );
 
-        await interaction.reply({ embeds: [embed], components: [row], ephemeral: false });
+        await interaction.reply({ embeds: [embed], components: [row] });
+        return;
+      }
+
+      if (interaction.commandName === 'embed') {
+        const title = interaction.options.getString('title', true);
+        const description = interaction.options.getString('description', true);
+        const color = interaction.options.getString('color') || '#7ad7f0';
+
+        const e = new EmbedBuilder()
+          .setTitle(title)
+          .setDescription(description)
+          .setColor(color);
+
+        await interaction.reply({ embeds: [e] });
+        return;
+      }
+
+      if (interaction.commandName === 'audit') {
+        // собираем опции
+        const actor = interaction.options.getUser('author', true);
+        const target = interaction.options.getUser('target', true);
+        const action = interaction.options.getString('action', true);
+        const reason = interaction.options.getString('reason') || '—';
+        const fromRank = interaction.options.getString('from_rank') || '—';
+        const toRank = interaction.options.getString('to_rank') || '—';
+
+        const mapAction = {
+          promote: 'Повышение',
+          demote: 'Понижение',
+          warn: 'Выговор',
+          fire: 'Увольнение',
+          give_rank: 'Выдача ранга'
+        };
+
+        const embed = new EmbedBuilder()
+          .setTitle('📝 Аудит — запись действия')
+          .addFields(
+            { name: 'Действие', value: mapAction[action] || action, inline: true },
+            { name: 'Кто', value: `<@${actor.id}>`, inline: true },
+            { name: 'Кого', value: `<@${target.id}>`, inline: true },
+            { name: 'Из ранга', value: fromRank === '—' ? '—' : `${fromRank}`, inline: true },
+            { name: 'В ранг', value: toRank === '—' ? '—' : `${toRank}`, inline: true },
+            { name: 'Причина', value: reason, inline: false },
+          )
+          .setTimestamp()
+          .setColor(0xf1c40f);
+
+        // отправляем в канал аудита
+        if (!AUDIT_CHANNEL_ID) {
+          await interaction.reply({ content: 'Ошибка: AUDIT_CHANNEL_ID не задан в .env', ephemeral: true });
+          return;
+        }
+
+        const ch = await client.channels.fetch(AUDIT_CHANNEL_ID).catch(() => null);
+        if (!ch || !ch.isTextBased()) {
+          await interaction.reply({ content: 'Не удалось найти текстовый канал аудита или нет доступа.', ephemeral: true });
+          return;
+        }
+
+        await ch.send({ embeds: [embed] }).catch(()=>{});
+        await interaction.reply({ content: 'Запись аудита отправлена.', ephemeral: true });
         return;
       }
     }
 
-    // ---- Обработка нажатий кнопок ----
+    // --- КНОПКИ / МОДАЛЫ ---
     if (interaction.isButton()) {
-      const id = interaction.customId;
-
-      // Кнопки панели: открыть модальное окно соответствующее
-      if (id === 'apply_submit' || id === 'apply_restore' || id === 'apply_unblack') {
-        // модальное окно
+      // кнопки панели заявок
+      if (interaction.customId.startsWith('apply_')) {
+        // show modal
+        const type = interaction.customId.split('_')[1]; // family / restore / unblack
         const modal = new ModalBuilder()
-          .setCustomId(`modal_${id}_${interaction.user.id}`)
-          .setTitle(id === 'apply_submit' ? 'Заявка в семью' : id === 'apply_restore' ? 'Восстановление' : 'Снятие ЧС');
+          .setCustomId(`apply_modal_${type}`)
+          .setTitle(type === 'family' ? 'Заявка в семью' : type === 'restore' ? 'Восстановление' : 'Снятие ЧС');
 
-        // общие поля
-        const nick = new TextInputBuilder().setCustomId('nick').setLabel('Ник | статик').setStyle(TextInputStyle.Short).setRequired(true);
-        const server = new TextInputBuilder().setCustomId('server').setLabel('Сервер').setStyle(TextInputStyle.Short).setRequired(true);
-        const age = new TextInputBuilder().setCustomId('age').setLabel('Имя и возраст').setStyle(TextInputStyle.Short).setRequired(true);
-        const about = new TextInputBuilder().setCustomId('about').setLabel('О себе (кратко)').setStyle(TextInputStyle.Paragraph).setRequired(true);
-        const motiv = new TextInputBuilder().setCustomId('motivation').setLabel('Мотивация / ожидания').setStyle(TextInputStyle.Paragraph).setRequired(true);
-
-        // добавляем по две строчки в modal (ActionRow не нужен — используем модальные поля в порядке)
         modal.addComponents(
-          new ActionRowBuilder().addComponents(nick),
-          new ActionRowBuilder().addComponents(server),
-          new ActionRowBuilder().addComponents(age),
-          new ActionRowBuilder().addComponents(about),
-          new ActionRowBuilder().addComponents(motiv),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('your_name')
+              .setLabel('Ваше имя')
+              .setStyle(TextInputStyle.Short)
+              .setRequired(true)
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('age')
+              .setLabel('Ваш возраст')
+              .setStyle(TextInputStyle.Short)
+              .setRequired(true)
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('discord_tag')
+              .setLabel('Ваш Discord для связи')
+              .setStyle(TextInputStyle.Short)
+              .setRequired(true)
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('ic_name')
+              .setLabel('IC - Имя, Фамилия, #статик')
+              .setStyle(TextInputStyle.Short)
+              .setRequired(true)
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('history')
+              .setLabel('В каких семьях состояли, опишите подробно')
+              .setStyle(TextInputStyle.Paragraph)
+              .setRequired(true)
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('motivation')
+              .setLabel('Почему именно мы?')
+              .setStyle(TextInputStyle.Paragraph)
+              .setRequired(true)
+          ),
         );
 
         await interaction.showModal(modal);
         return;
       }
-
-      // Кнопки приложения в сообщении-заявке: принят/отклонить/редактировать
-      if (id.startsWith('app_accept_') || id.startsWith('app_deny_') || id.startsWith('app_edit_')) {
-        // формат customId: app_accept_<messageId> или app_accept_<userId> — у нас используем messageId
-        // но безопаснее: получаем оригинальное сообщение через interaction.message
-        const isAllowed = interaction.member.permissions.has(PermissionFlagsBits.ManageGuild) || interaction.member.permissions.has(PermissionFlagsBits.ManageRoles) || interaction.member.permissions.has(PermissionFlagsBits.Administrator);
-        if (!isAllowed) {
-          await interaction.reply({ content: 'У вас нет прав для этого.', ephemeral: true });
-          return;
-        }
-
-        const originalEmbed = interaction.message.embeds?.[0] ? EmbedBuilder.from(interaction.message.embeds[0]) : null;
-        const actor = interaction.user;
-
-        if (id.startsWith('app_accept_')) {
-          if (originalEmbed) originalEmbed.setColor(0x57F287).addFields({ name: '📌 Статус', value: `Принят: ${actor.tag}`, inline: false });
-          await interaction.message.edit({ embeds: originalEmbed ? [originalEmbed] : [], components: [] }).catch(()=>{});
-          const thread = interaction.message.thread ?? await interaction.message.startThread({ name: `Решение — ${actor.username}`, autoArchiveDuration: 10080 }).catch(()=>null);
-          if (thread) await thread.send(`Заявка принята ${actor} (${actor.tag})`).catch(()=>{});
-          // отправим лог в аудит
-          if (AUDIT_CHANNEL_ID) {
-            const ch = await client.channels.fetch(AUDIT_CHANNEL_ID).catch(()=>null);
-            if (ch) {
-              const emb = new EmbedBuilder()
-                .setTitle('✅ Заявка принята')
-                .setDescription(`Пользователь: ${actor.tag}\nСообщение: ${interaction.id}`)
-                .setColor(0x57F287)
-                .setTimestamp();
-              await ch.send({ embeds: [emb] }).catch(()=>{});
-            }
-          }
-          await interaction.reply({ content: 'Вы приняли заявку.', ephemeral: true });
-          return;
-        }
-
-        if (id.startsWith('app_deny_')) {
-          if (originalEmbed) originalEmbed.setColor(0xED4245).addFields({ name: '📌 Статус', value: `Отклонено: ${actor.tag}`, inline: false });
-          await interaction.message.edit({ embeds: originalEmbed ? [originalEmbed] : [], components: [] }).catch(()=>{});
-          const thread = interaction.message.thread ?? await interaction.message.startThread({ name: `Решение — ${actor.username}`, autoArchiveDuration: 10080 }).catch(()=>null);
-          if (thread) await thread.send(`Заявка отклонена ${actor} (${actor.tag})`).catch(()=>{});
-          if (AUDIT_CHANNEL_ID) {
-            const ch = await client.channels.fetch(AUDIT_CHANNEL_ID).catch(()=>null);
-            if (ch) {
-              const emb = new EmbedBuilder()
-                .setTitle('❌ Заявка отклонена')
-                .setDescription(`Пользователь: ${actor.tag}\nСообщение: ${interaction.id}`)
-                .setColor(0xED4245)
-                .setTimestamp();
-              await ch.send({ embeds: [emb] }).catch(()=>{});
-            }
-          }
-          await interaction.reply({ content: 'Вы отклонили заявку.', ephemeral: true });
-          return;
-        }
-
-        if (id.startsWith('app_edit_')) {
-          if (originalEmbed) originalEmbed.setColor(0xFAA61A).addFields({ name: '📌 Статус', value: `Запрошены правки: ${actor.tag}`, inline: false });
-          await interaction.message.edit({ embeds: originalEmbed ? [originalEmbed] : [] }).catch(()=>{});
-          const thread = interaction.message.thread ?? await interaction.message.startThread({ name: `Решение — ${actor.username}`, autoArchiveDuration: 10080 }).catch(()=>null);
-          if (thread) await thread.send(`${actor} запросил(а) правки у заявителя.`).catch(()=>{});
-          if (AUDIT_CHANNEL_ID) {
-            const ch = await client.channels.fetch(AUDIT_CHANNEL_ID).catch(()=>null);
-            if (ch) {
-              const emb = new EmbedBuilder()
-                .setTitle('✏️ Запрошены правки')
-                .setDescription(`Пользователь: ${actor.tag}\nСообщение: ${interaction.id}`)
-                .setColor(0xFAA61A)
-                .setTimestamp();
-              await ch.send({ embeds: [emb] }).catch(()=>{});
-            }
-          }
-          await interaction.reply({ content: 'Запрошены правки.', ephemeral: true });
-          return;
-        }
-      }
     }
 
-    // ---- Обработка отправленных модалов ----
+    // --- MODAL SUBMIT ---
     if (interaction.isModalSubmit()) {
-      // customId = modal_apply_submit_<userId> или similar
-      const cid = interaction.customId || '';
-      if (cid.startsWith('modal_modal_') || cid.startsWith('modal_apply_submit_') || cid.includes('apply')) {
-        // получаем поля
-        const nick = interaction.fields.getTextInputValue('nick');
-        const server = interaction.fields.getTextInputValue('server');
+      if (interaction.customId.startsWith('apply_modal_')) {
+        const type = interaction.customId.split('_')[2];
+        // собираем ответы
+        const yourName = interaction.fields.getTextInputValue('your_name');
         const age = interaction.fields.getTextInputValue('age');
-        const about = interaction.fields.getTextInputValue('about');
+        const discordTag = interaction.fields.getTextInputValue('discord_tag');
+        const ic = interaction.fields.getTextInputValue('ic_name');
+        const history = interaction.fields.getTextInputValue('history');
         const motivation = interaction.fields.getTextInputValue('motivation');
 
-        // формируем embed
-        const emb = new EmbedBuilder()
-          .setTitle('📝 Заявка на вступление')
-          .setDescription(`Заявитель: ${interaction.user} (${interaction.user.tag})`)
+        const embed = new EmbedBuilder()
+          .setTitle(`📩 Новая заявка — ${type === 'family' ? 'Вступление' : type === 'restore' ? 'Восстановление' : 'Снятие ЧС'}`)
+          .setColor(0x7b68ee)
           .addFields(
-            { name: 'Ник | Статик', value: nick || '-', inline: false },
-            { name: 'Сервер', value: server || '-', inline: true },
-            { name: 'Имя и возраст', value: age || '-', inline: true },
-            { name: 'О себе', value: about || '-', inline: false },
-            { name: 'Мотивация', value: motivation || '-', inline: false },
+            { name: 'OOC - Ваше имя', value: yourName || '—' },
+            { name: 'OOC - Ваш возраст', value: age || '—' },
+            { name: 'OOC - Ваш дискорд для связи', value: discordTag || '—' },
+            { name: 'IC - Ваше Имя, Фамилия, #статик', value: ic || '—' },
+            { name: 'IC - В каких семьях состояли', value: history || '—' },
+            { name: 'IC - Почему именно мы?', value: motivation || '—' },
           )
-          .setColor(0x6A5ACD)
+          .setFooter({ text: 'Секретарь Deko — заявка из формы' })
           .setTimestamp();
 
-        // TODO: если нужно добавить gradient / красивости — нельзя прямо в embed, ограничены discord API
-
-        // компоненты: кнопки принят/отклонить/правки
-        const btns = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`app_accept_${Date.now()}`).setLabel('Принять').setStyle(ButtonStyle.Success),
-          new ButtonBuilder().setCustomId(`app_edit_${Date.now()}`).setLabel('Запросить правки').setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder().setCustomId(`app_deny_${Date.now()}`).setLabel('Отклонить').setStyle(ButtonStyle.Danger),
-        );
-
-        // отправляем в канал заявок
         if (!APP_CHANNEL_ID) {
           await interaction.reply({ content: 'Ошибка: APP_CHANNEL_ID не задан в .env', ephemeral: true });
           return;
         }
+
         const ch = await client.channels.fetch(APP_CHANNEL_ID).catch(()=>null);
-        if (!ch) {
-          await interaction.reply({ content: `Не найден канал заявок ID=${APP_CHANNEL_ID}`, ephemeral: true });
+        if (!ch || !ch.isTextBased()) {
+          await interaction.reply({ content: 'Не удалось найти канал для заявок или бот не имеет доступа.', ephemeral: true });
           return;
         }
 
-        // упоминание ролей
-        const ping = PING_ROLES.length ? PING_ROLES.map(id=>`<@&${id}>`).join(' ') : null;
+        // формируем упоминание ролей (если заданы)
+        const allowedMentions = {};
+        const contentMention = ROLE_IDS_ARRAY.length ? ROLE_IDS_ARRAY.map(r => `<@&${r}>`).join(' ') : '';
 
-        // отправка
-        const sent = await ch.send({ content: ping || null, embeds: [emb], components: [btns] }).catch(async (err) => {
-          console.error('Ошибка отправки заявки в канал:', err);
-          await interaction.reply({ content: 'Ошибка при отправке заявки (см. логи).', ephemeral: true });
-          return null;
-        });
+        const sent = await ch.send({ content: `${contentMention || ''}`, embeds: [embed] }).catch((e)=>{ console.error('send err', e); return null; });
+        if (sent) {
+          // создаём тред для обсуждения (если возможно)
+          try {
+            const thread = sent.startThread ? await sent.startThread({ name: `Заявка — ${yourName.slice(0, 50)}` }) : null;
+            if (thread) {
+              await thread.send(`Новая заявка принята в тред для обсуждения. ${contentMention || ''}`).catch(()=>{});
+            }
+          } catch(e) { /* ignore */ }
+          await interaction.reply({ content: 'Заявка отправлена.', ephemeral: true });
+        } else {
+          await interaction.reply({ content: 'Не удалось отправить заявку — проверьте права бота в канале.', ephemeral: true });
+        }
 
-        if (!sent) return;
-        // если канал — форум, сообщение будет опубликовано как пост; бот также может стартовать тред (по желанию)
-        await interaction.reply({ content: 'Заявка успешно отправлена.', ephemeral: true });
         return;
       }
     }
 
   } catch (err) {
     console.error('Ошибка взаимодействия:', err);
-    try { if (!interaction.replied) await interaction.reply({ content: 'Произошла ошибка, админ уведомлён.', ephemeral: true }); } catch {}
+    // безопасно отвечаем пользователю если интеракция живa и не ответили
+    try {
+      if (interaction && !interaction.replied) {
+        await interaction.reply({ content: 'Произошла ошибка, администратор уведомлён.', ephemeral: true });
+      }
+    } catch {}
   }
 });
 
-// ----- Логин -----
-client.login(TOKEN).catch(err => {
-  console.error('Не удалось залогиниться:', err);
+// логин
+client.login(DISCORD_TOKEN).catch(err => {
+  console.error('Не удалось залогиниться — проверьте DISCORD_TOKEN:', err);
 });

@@ -1,12 +1,9 @@
-// index.js
-// Fully integrated bot: automatic command registration + handlers for
-// apply-panel (forum posts & threads), embed, audit, blacklist (ЧС),
-// modals, accept/deny buttons, leader logs.
-// Requires: discord.js v14, @discordjs/rest, discord-api-types, dotenv
+// index.js — Versize all-in-one
 import 'dotenv/config';
-import { REST } from '@discordjs/rest';
-import { Routes } from 'discord-api-types/v10';
 import express from 'express';
+import fetch from 'node-fetch';
+import cookieParser from 'cookie-parser';
+import session from 'express-session';
 
 import {
   Client,
@@ -20,43 +17,68 @@ import {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
-  EmbedBuilder
+  EmbedBuilder,
+  PermissionFlagsBits
 } from 'discord.js';
 
-// --------------------------- ENV ---------------------------
+import { REST } from '@discordjs/rest';
+import { Routes } from 'discord-api-types/v10';
+
+// -------------------------------
+//  ENV / config
+// -------------------------------
 const {
   DISCORD_TOKEN,
   CLIENT_ID,
+  CLIENT_SECRET,
   GUILD_ID,
-  APP_CHANNEL_ID,         // forum channel id for applications (forum)
-  AUDIT_CHANNEL_ID,       // audit logs channel id
-  LEADERS_LOG_CHANNEL_ID, // leaders logs channel id
-  BLACKLIST_CHANNEL_ID,   // blacklist channel id
-  ALLOWED_ROLES           // comma-separated role ids that receive mentions / can use panel
+  APP_CHANNEL_ID,
+  AUDIT_CHANNEL_ID,
+  LEADERS_LOG_CHANNEL_ID,
+  BLACKLIST_CHANNEL_ID,
+  ALLOWED_ROLES,
+  OAUTH_REDIRECT_URI,
+  SESSION_SECRET,
+  PORT
 } = process.env;
 
-if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID) {
-  console.error('Missing required env vars: DISCORD_TOKEN, CLIENT_ID, GUILD_ID');
-  process.exit(1);
+function envCheck(name, val) {
+  if (!val) console.warn(`⚠️ ENV ${name} is not set`);
 }
+['DISCORD_TOKEN','CLIENT_ID','GUILD_ID'].forEach(n => envCheck(n, process.env[n]));
 
 const ALLOWED_ROLE_IDS = (ALLOWED_ROLES || '').split(',').map(s => s.trim()).filter(Boolean);
 
-// ---------------------- COMMANDS DEFINITION ----------------------
-const commandsDef = [
+// -------------------------------
+//  Discord client
+// -------------------------------
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ],
+  partials: [Partials.Channel, Partials.Message]
+});
+
+// -------------------------------
+//  Define commands (slash)
+// -------------------------------
+const commands = [
   new SlashCommandBuilder().setName('apply-panel').setDescription('Опубликовать панель заявок'),
   new SlashCommandBuilder()
     .setName('embed')
     .setDescription('Создать эмбэд')
     .addStringOption(o => o.setName('title').setDescription('Заголовок').setRequired(true))
     .addStringOption(o => o.setName('description').setDescription('Текст').setRequired(true))
-    .addStringOption(o => o.setName('color').setDescription('Цвет hex (#rrggbb)').setRequired(false)),
+    .addStringOption(o => o.setName('color').setDescription('Цвет #hex')),
   new SlashCommandBuilder()
     .setName('audit')
-    .setDescription('Записать действие лидера (лог)')
-    .addUserOption(o => o.setName('author').setDescription('Кто совершил действие').setRequired(true))
-    .addUserOption(o => o.setName('target').setDescription('Кого касается').setRequired(true))
-    .addStringOption(o => o.setName('action').setDescription('Тип действия').setRequired(true)
+    .setDescription('Записать в аудит')
+    .addUserOption(o => o.setName('author').setDescription('Кто').setRequired(true))
+    .addUserOption(o => o.setName('target').setDescription('Кого').setRequired(true))
+    .addStringOption(o => o.setName('action').setDescription('Действие').setRequired(true)
       .addChoices(
         { name: 'Повышение', value: 'promote' },
         { name: 'Понижение', value: 'demote' },
@@ -64,85 +86,83 @@ const commandsDef = [
         { name: 'Увольнение', value: 'fire' },
         { name: 'Выдача ранга', value: 'give_rank' }
       ))
-    .addStringOption(o => o.setName('from_rank').setDescription('С какого ранга').setRequired(false)
+    .addStringOption(o => o.setName('from_rank').setDescription('С какого ранга')
       .addChoices(
         { name: '8 — Generalisimus', value: '8' },
         { name: '7 — Vice Gen.', value: '7' },
         { name: '6 — Gen. Secretary', value: '6' },
         { name: '5 — Curator', value: '5' },
-        { name: "4 — Curator's Office", value: '4' },
+        { name: '4 — Curator\'s Office', value: '4' },
         { name: '3 — Stacked', value: '3' },
         { name: '2 — Main', value: '2' },
         { name: '1 — NewBie', value: '1' }
       ))
-    .addStringOption(o => o.setName('to_rank').setDescription('На какой ранг').setRequired(false)
+    .addStringOption(o => o.setName('to_rank').setDescription('На какой ранг')
       .addChoices(
         { name: '8 — Generalisimus', value: '8' },
         { name: '7 — Vice Gen.', value: '7' },
         { name: '6 — Gen. Secretary', value: '6' },
         { name: '5 — Curator', value: '5' },
-        { name: "4 — Curator's Office", value: '4' },
+        { name: '4 — Curator\'s Office', value: '4' },
         { name: '3 — Stacked', value: '3' },
         { name: '2 — Main', value: '2' },
         { name: '1 — NewBie', value: '1' }
       ))
-    .addStringOption(o => o.setName('reason').setDescription('Причина / описание').setRequired(false)),
+    .addStringOption(o => o.setName('reason').setDescription('Причина')),
   new SlashCommandBuilder()
     .setName('blacklist')
-    .setDescription('Управление ЧС (blacklist)')
-    .addSubcommand(sc => sc.setName('add').setDescription('Добавить в ЧС')
-      .addStringOption(o => o.setName('static').setDescription('Статик (например Family #1234)').setRequired(true))
-      .addUserOption(o => o.setName('member').setDescription('Пользователь (опционально)').setRequired(false))
-      .addStringOption(o => o.setName('reason').setDescription('Причина').setRequired(true))
-      .addStringOption(o => o.setName('duration').setDescription('Срок, e.g. 30d или forever').setRequired(false)))
-    .addSubcommand(sc => sc.setName('remove').setDescription('Удалить из ЧС')
-      .addStringOption(o => o.setName('static').setDescription('Статик (по которому искать)').setRequired(false))
-      .addStringOption(o => o.setName('message_id').setDescription('ID сообщения в канале ЧС').setRequired(false)))
-    .addSubcommand(sc => sc.setName('list').setDescription('Показать последние записи ЧС')
-      .addIntegerOption(o => o.setName('limit').setDescription('Сколько записей показать (max 25)').setRequired(false)))
-];
+    .setDescription('Добавить в черный список семьи')
+    .addStringOption(o => o.setName('static').setDescription('Статик участника / идентификатор').setRequired(true))
+    .addUserOption(o => o.setName('member').setDescription('Участник (если нужно)'))
+    .addStringOption(o => o.setName('reason').setDescription('Причина').setRequired(true))
+    .addStringOption(o => o.setName('duration').setDescription('Срок (например: 30d, permanent)').setRequired(false))
+].map(c => c.toJSON());
 
-const commandsJSON = commandsDef.map(c => c.toJSON());
+// -------------------------------
+//  Register commands on startup
+// -------------------------------
+async function registerCommands() {
+  if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID) {
+    console.error('Missing DISCORD_TOKEN / CLIENT_ID / GUILD_ID — cannot register commands');
+    return;
+  }
 
-// ---------------------- REGISTER COMMANDS (GUILD) ----------------------
-(async () => {
   const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
   try {
-    console.log('Registering slash commands to guild', GUILD_ID);
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commandsJSON });
-    console.log('Slash commands registered.');
+    console.log('Registering slash commands to guild', GUILD_ID, 'app', CLIENT_ID);
+    const res = await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+    console.log('Commands registered:', Array.isArray(res) ? res.length : 'unknown');
   } catch (err) {
-    console.error('Failed to register commands:', err);
+    console.error('Slash registration error:', err?.message || err);
+    if (err?.rawError) console.error('rawError:', err.rawError);
   }
-})();
+}
 
-// ---------------------- CLIENT ----------------------
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers],
-  partials: [Partials.Channel, Partials.Message]
-});
-
-client.once(Events.ClientReady, () => {
-  console.log(`Bot logged in as ${client.user.tag}`);
-});
-
-// ---------------------- INTERACTIONS ----------------------
+// -------------------------------
+//  Interaction handling
+// -------------------------------
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // Chat input commands
+    // SLASH COMMANDS
     if (interaction.isChatInputCommand()) {
-      const cmd = interaction.commandName;
+      const name = interaction.commandName;
 
-      // apply-panel: post a panel with buttons
-      if (cmd === 'apply-panel') {
-        // permission optional: allow only roles with ManageGuild or roles from ALLOWED_ROLE_IDS
+      // apply-panel
+      if (name === 'apply-panel') {
+        // optional check: allow only leaders
+        const has = ALLOWED_ROLE_IDS.length === 0 || interaction.member.roles.cache.some(r => ALLOWED_ROLE_IDS.includes(r.id));
+        if (!has && !interaction.memberPermissions?.has?.(PermissionFlagsBits.ManageGuild)) {
+          await interaction.reply({ content: 'У вас нет прав на публикацию панели.', ephemeral: true });
+          return;
+        }
+
         const embed = new EmbedBuilder()
-          .setTitle('✉️ Панель заявок')
-          .setDescription('Выберите тип заявки и нажмите кнопку.')
-          .setColor(0x8e44ad);
+          .setTitle('✉️ Панель заявок Versize')
+          .setDescription('Выберите тип заявки ниже.')
+          .setColor(0x7b68ee);
 
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('apply_family').setLabel('Вступление').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId('apply_family').setLabel('Подать в семью').setStyle(ButtonStyle.Primary),
           new ButtonBuilder().setCustomId('apply_restore').setLabel('Восстановление').setStyle(ButtonStyle.Secondary),
           new ButtonBuilder().setCustomId('apply_unblack').setLabel('Снятие ЧС').setStyle(ButtonStyle.Secondary)
         );
@@ -151,8 +171,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      // embed command
-      if (cmd === 'embed') {
+      // embed
+      if (name === 'embed') {
         const title = interaction.options.getString('title', true);
         const description = interaction.options.getString('description', true);
         const color = interaction.options.getString('color') || '#7b68ee';
@@ -161,192 +181,134 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      // audit command
-      if (cmd === 'audit') {
-        const author = interaction.options.getUser('author', true);
+      // audit
+      if (name === 'audit') {
+        const actor = interaction.options.getUser('author', true);
         const target = interaction.options.getUser('target', true);
         const action = interaction.options.getString('action', true);
         const fromRank = interaction.options.getString('from_rank') || '—';
         const toRank = interaction.options.getString('to_rank') || '—';
         const reason = interaction.options.getString('reason') || '—';
 
-        const map = { promote: 'Повышение', demote: 'Понижение', warn: 'Выговор', fire: 'Увольнение', give_rank: 'Выдача ранга' };
+        const ACTION_MAP = { promote: 'Повышение', demote: 'Понижение', warn: 'Выговор', fire: 'Увольнение', give_rank: 'Выдача ранга' };
+
         const emb = new EmbedBuilder()
-          .setTitle('📝 Аудит — запись действия')
+          .setTitle('📝 Аудит')
           .setColor(0xf1c40f)
           .addFields(
-            { name: 'Действие', value: map[action] || action, inline: true },
-            { name: 'Кто', value: `<@${author.id}>`, inline: true },
+            { name: 'Действие', value: ACTION_MAP[action] || action, inline: true },
+            { name: 'Кто', value: `<@${actor.id}>`, inline: true },
             { name: 'Кого', value: `<@${target.id}>`, inline: true },
             { name: 'С ранга', value: fromRank, inline: true },
-            { name: 'В ранг', value: toRank, inline: true },
+            { name: 'На ранг', value: toRank, inline: true },
             { name: 'Причина', value: reason, inline: false }
           )
           .setTimestamp();
 
         if (!AUDIT_CHANNEL_ID) {
-          await interaction.reply({ content: 'AUDIT_CHANNEL_ID not set.', ephemeral: true });
+          await interaction.reply({ content: 'AUDIT_CHANNEL_ID не настроен в .env', ephemeral: true });
           return;
         }
         const ch = await client.channels.fetch(AUDIT_CHANNEL_ID).catch(() => null);
         if (!ch || !ch.isTextBased()) {
-          await interaction.reply({ content: 'Cannot find audit channel or no access.', ephemeral: true });
+          await interaction.reply({ content: 'Не могу отправить в канал аудита (проверь ID / права).', ephemeral: true });
           return;
         }
-        await ch.send({ embeds: [emb] }).catch(() => {});
-        await interaction.reply({ content: 'Audit recorded.', ephemeral: true });
+        await ch.send({ embeds: [emb] }).catch(()=>{});
+        await interaction.reply({ content: 'Аудит отправлен.', ephemeral: true });
         return;
       }
 
-      // blacklist command (subcommands add/remove/list)
-      if (cmd === 'blacklist') {
-        // permission check: manageGuild or role in ALLOWED_ROLE_IDS
-        let allowed = false;
-        try {
-          if (interaction.memberPermissions?.has('ManageGuild')) allowed = true;
-          if (!allowed && ALLOWED_ROLE_IDS.length) {
-            const roles = interaction.member?.roles?.cache?.map(r => r.id) || [];
-            allowed = roles.some(r => ALLOWED_ROLE_IDS.includes(r));
-          }
-        } catch (e) { /* ignore */ }
-
-        if (!allowed) {
-          await interaction.reply({ content: 'У вас нет прав для работы с ЧС.', ephemeral: true });
+      // blacklist
+      if (name === 'blacklist') {
+        // check allowed roles
+        const allowed = ALLOWED_ROLE_IDS.length === 0 || interaction.member.roles.cache.some(r => ALLOWED_ROLE_IDS.includes(r.id));
+        if (!allowed && !interaction.memberPermissions?.has?.(PermissionFlagsBits.ManageGuild)) {
+          await interaction.reply({ content: 'У вас нет прав выполнять эту команду.', ephemeral: true });
           return;
         }
 
-        const sub = interaction.options.getSubcommand();
+        const staticName = interaction.options.getString('static', true);
+        const member = interaction.options.getUser('member');
+        const reason = interaction.options.getString('reason', true);
+        const duration = interaction.options.getString('duration') || '—';
+
+        const emb = new EmbedBuilder()
+          .setTitle('⛔️ Новая запись в Blacklist')
+          .setColor(0xe74c3c)
+          .addFields(
+            { name: 'Статик', value: staticName, inline: true },
+            { name: 'Участник', value: member ? `<@${member.id}>` : '—', inline: true },
+            { name: 'Причина', value: reason, inline: false },
+            { name: 'Срок', value: duration, inline: true },
+            { name: 'Добавил', value: `<@${interaction.user.id}>`, inline: true }
+          )
+          .setTimestamp();
+
         if (!BLACKLIST_CHANNEL_ID) {
-          await interaction.reply({ content: 'BLACKLIST_CHANNEL_ID not set.', ephemeral: true });
+          await interaction.reply({ content: 'BLACKLIST_CHANNEL_ID не задан в .env', ephemeral: true });
           return;
         }
-        const blCh = await client.channels.fetch(BLACKLIST_CHANNEL_ID).catch(() => null);
-        if (!blCh || !blCh.isTextBased()) {
-          await interaction.reply({ content: 'Cannot access blacklist channel.', ephemeral: true });
-          return;
-        }
-
-        if (sub === 'add') {
-          const staticText = interaction.options.getString('static', true);
-          const user = interaction.options.getUser('member', false);
-          const reason = interaction.options.getString('reason', true);
-          const duration = interaction.options.getString('duration') || '—';
-
-          const emb = new EmbedBuilder()
-            .setTitle('⛔ Blacklist Entry')
-            .addFields(
-              { name: 'Статик', value: staticText, inline: true },
-              { name: 'Пользователь', value: user ? `<@${user.id}>` : '—', inline: true },
-              { name: 'Причина', value: reason },
-              { name: 'Срок', value: duration, inline: true },
-              { name: 'Добавил', value: `<@${interaction.user.id}>`, inline: true }
-            )
-            .setTimestamp()
-            .setColor(0xe74c3c);
-
-          const sent = await blCh.send({ embeds: [emb] }).catch(err => { console.error('BL send error', err); return null; });
-          if (!sent) {
-            await interaction.reply({ content: 'Failed to add to blacklist.', ephemeral: true });
-            return;
-          }
-          await interaction.reply({ content: `Added to blacklist: ${staticText}\n${sent.url}`, ephemeral: true });
+        const ch = await client.channels.fetch(BLACKLIST_CHANNEL_ID).catch(() => null);
+        if (!ch || !ch.isTextBased()) {
+          await interaction.reply({ content: 'Не могу найти канал для черного списка или нет прав.', ephemeral: true });
           return;
         }
 
-        if (sub === 'remove') {
-          const messageId = interaction.options.getString('message_id');
-          const staticText = interaction.options.getString('static');
+        // send and also post a short pinned summary (optionally)
+        await ch.send({ embeds: [emb] }).catch(()=>{});
+        // Optionally: maintain a persistent message list — skipped for simplicity
 
-          if (messageId) {
-            try {
-              const msg = await blCh.messages.fetch(messageId);
-              await msg.delete();
-              await interaction.reply({ content: `Removed entry (id: ${messageId}).`, ephemeral: true });
-              return;
-            } catch (e) {
-              await interaction.reply({ content: `Cannot find/delete message id ${messageId}.`, ephemeral: true });
-              return;
-            }
+        // also log to leaders log
+        if (LEADERS_LOG_CHANNEL_ID) {
+          const logch = await client.channels.fetch(LEADERS_LOG_CHANNEL_ID).catch(()=>null);
+          if (logch && logch.isTextBased()) {
+            await logch.send({
+              embeds: [
+                new EmbedBuilder()
+                  .setTitle('📋 Blacklist — добавлен')
+                  .addFields(
+                    { name: 'Статик', value: staticName },
+                    { name: 'Кто', value: `<@${interaction.user.id}>` },
+                    { name: 'Причина', value: reason },
+                    { name: 'Срок', value: duration }
+                  )
+                  .setColor(0xff9900)
+                  .setTimestamp()
+              ]
+            }).catch(()=>{});
           }
-
-          if (staticText) {
-            const fetched = await blCh.messages.fetch({ limit: 100 }).catch(() => null);
-            if (!fetched) {
-              await interaction.reply({ content: 'Failed to fetch blacklist messages.', ephemeral: true });
-              return;
-            }
-            const found = fetched.find(m => {
-              const e = m.embeds[0];
-              if (!e) return false;
-              const f = e.fields?.find(ff => ff.name === 'Статик' || ff.name === 'Статик');
-              return f && f.value && f.value.toLowerCase().includes(staticText.toLowerCase());
-            });
-            if (!found) {
-              await interaction.reply({ content: 'No entry found with that static.', ephemeral: true });
-              return;
-            }
-            await found.delete().catch(() => {});
-            await interaction.reply({ content: `Removed entry for "${staticText}".`, ephemeral: true });
-            return;
-          }
-
-          await interaction.reply({ content: 'Provide message_id or static to remove.', ephemeral: true });
-          return;
         }
 
-        if (sub === 'list') {
-          const limit = Math.min(interaction.options.getInteger('limit') || 10, 25);
-          const fetched = await blCh.messages.fetch({ limit }).catch(() => null);
-          if (!fetched) {
-            await interaction.reply({ content: 'Failed to fetch blacklist entries.', ephemeral: true });
-            return;
-          }
-          const lines = fetched.map(m => {
-            const e = m.embeds[0];
-            if (!e) return `${m.id} — (no embed)`;
-            const s = e.fields?.find(f => f.name === 'Статик')?.value || '—';
-            const r = e.fields?.find(f => f.name === 'Причина')?.value || '—';
-            const d = e.fields?.find(f => f.name === 'Срок')?.value || '—';
-            return `• ${s} | ${r} | ${d} — ${m.url}`;
-          }).slice(0, limit);
-          if (!lines.length) {
-            await interaction.reply({ content: 'Blacklist is empty.', ephemeral: true });
-            return;
-          }
-          await interaction.reply({ content: `Latest blacklist entries:\n${lines.join('\n')}`, ephemeral: true, allowedMentions: { parse: [] } });
-          return;
-        }
+        await interaction.reply({ content: 'Добавлено в черный список.', ephemeral: true });
+        return;
       }
-
-      // end of slash handlers
     }
 
-    // Buttons
+    // BUTTONS (apply panel)
     if (interaction.isButton()) {
-      const id = interaction.customId;
-
-      // buttons for apply-panel open modals
-      if (id === 'apply_family' || id === 'apply_restore' || id === 'apply_unblack') {
-        const type = id.split('_')[1]; // family / restore / unblack
+      if (interaction.customId.startsWith('apply_')) {
+        const type = interaction.customId.replace('apply_', '');
         const modal = new ModalBuilder()
           .setCustomId(`apply_modal_${type}`)
           .setTitle(type === 'family' ? 'Заявка — вступление' : type === 'restore' ? 'Заявка — восстановление' : 'Заявка — снятие ЧС');
 
+        // Discord allows up to 5 text inputs in a modal
         modal.addComponents(
           new ActionRowBuilder().addComponents(
             new TextInputBuilder().setCustomId('your_name').setLabel('Ваше имя (OOC)').setStyle(TextInputStyle.Short).setRequired(true)
           ),
           new ActionRowBuilder().addComponents(
-            new TextInputBuilder().setCustomId('discord').setLabel('Discord (nick#0000)').setStyle(TextInputStyle.Short).setRequired(true)
+            new TextInputBuilder().setCustomId('discord').setLabel('Ваш Discord').setStyle(TextInputStyle.Short).setRequired(true)
           ),
           new ActionRowBuilder().addComponents(
-            new TextInputBuilder().setCustomId('ic').setLabel('IC - Имя, Фамилия, #статик').setStyle(TextInputStyle.Short).setRequired(true)
+            new TextInputBuilder().setCustomId('ic_name').setLabel('IC имя / статик').setStyle(TextInputStyle.Short).setRequired(true)
           ),
           new ActionRowBuilder().addComponents(
-            new TextInputBuilder().setCustomId('history').setLabel('В каких семьях состояли?').setStyle(TextInputStyle.Paragraph).setRequired(true)
+            new TextInputBuilder().setCustomId('history').setLabel('Где были раньше?').setStyle(TextInputStyle.Paragraph).setRequired(true)
           ),
           new ActionRowBuilder().addComponents(
-            new TextInputBuilder().setCustomId('motivation').setLabel('Почему выбираете нас?').setStyle(TextInputStyle.Paragraph).setRequired(true)
+            new TextInputBuilder().setCustomId('motivation').setLabel('Почему именно мы?').setStyle(TextInputStyle.Paragraph).setRequired(true)
           )
         );
 
@@ -354,72 +316,59 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      // accept button inside thread (expects to be pressed in a thread)
-      if (id.startsWith('accept_')) {
+      // accept/deny inside thread
+      if (interaction.customId.startsWith('accept_')) {
         const thread = interaction.channel;
-        if (!thread.isThread()) {
-          await interaction.reply({ content: 'This button works inside threads only.', ephemeral: true });
-          return;
-        }
-        const emb = new EmbedBuilder().setTitle('✅ Заявка одобрена').setDescription(`Лидер: <@${interaction.user.id}>`).setColor(0x2ecc71).setTimestamp();
-        await thread.send({ embeds: [emb] }).catch(() => {});
-        await thread.setArchived(true).catch(() => {});
+        if (!thread?.isThread()) return interaction.reply({ content: 'Кнопка работает в треде.', ephemeral: true });
+
+        await thread.send({ embeds: [new EmbedBuilder().setTitle('✅ Заявка одобрена').setDescription(`Лидер: <@${interaction.user.id}>`).setColor(0x2ecc71).setTimestamp()] }).catch(()=>{});
+        await thread.setArchived(true).catch(()=>{});
         if (LEADERS_LOG_CHANNEL_ID) {
-          const log = await client.channels.fetch(LEADERS_LOG_CHANNEL_ID).catch(() => null);
-          if (log && log.isTextBased()) {
-            await log.send({ embeds: [new EmbedBuilder().setTitle('📗 Одобрение заявки').addFields({ name: 'Лидер', value: `<@${interaction.user.id}>` }, { name: 'Тред', value: thread.name }).setColor(0x2ecc71)] }).catch(() => {});
-          }
+          const lch = await client.channels.fetch(LEADERS_LOG_CHANNEL_ID).catch(()=>null);
+          if (lch && lch.isTextBased()) await lch.send({ embeds: [new EmbedBuilder().setTitle('📗 Одобрено').addFields({ name: 'Лидер', value: `<@${interaction.user.id}>` }, { name: 'Тред', value: thread.name }).setColor(0x2ecc71)] }).catch(()=>{});
         }
-        await interaction.reply({ content: 'Application accepted.', ephemeral: true });
+        await interaction.reply({ content: 'Одобрено.', ephemeral: true });
         return;
       }
-
-      // deny button opens modal for reason
-      if (id.startsWith('deny_')) {
-        const modal = new ModalBuilder().setCustomId('deny_reason_modal').setTitle('Причина отклонения')
-          .addComponents(new ActionRowBuilder().addComponents(
-            new TextInputBuilder().setCustomId('reason').setLabel('Причина').setStyle(TextInputStyle.Paragraph).setRequired(true)
-          ));
+      if (interaction.customId.startsWith('deny_')) {
+        const modal = new ModalBuilder().setCustomId('deny_reason_modal').setTitle('Причина отклонения').addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('reason').setLabel('Причина').setStyle(TextInputStyle.Paragraph).setRequired(true))
+        );
         await interaction.showModal(modal);
         return;
       }
     }
 
-    // Modal submits
+    // MODAL SUBMIT
     if (interaction.isModalSubmit()) {
-      // deny reason modal
       if (interaction.customId === 'deny_reason_modal') {
         const reason = interaction.fields.getTextInputValue('reason');
         const thread = interaction.channel;
-        const emb = new EmbedBuilder().setTitle('❌ Заявка отклонена').setDescription(`Причина: **${reason}**\nЛидер: <@${interaction.user.id}>`).setColor(0xe74c3c).setTimestamp();
-        await thread.send({ embeds: [emb] }).catch(() => {});
-        await thread.setArchived(true).catch(() => {});
+        await thread.send({ embeds: [new EmbedBuilder().setTitle('❌ Отклонено').setDescription(`Причина: ${reason}\nЛидер: <@${interaction.user.id}>`).setColor(0xe74c3c).setTimestamp()] }).catch(()=>{});
+        await thread.setArchived(true).catch(()=>{});
         if (LEADERS_LOG_CHANNEL_ID) {
-          const log = await client.channels.fetch(LEADERS_LOG_CHANNEL_ID).catch(() => null);
-          if (log && log.isTextBased()) {
-            await log.send({ embeds: [new EmbedBuilder().setTitle('📕 Отклонение заявки').addFields({ name: 'Лидер', value: `<@${interaction.user.id}>` }, { name: 'Причина', value: reason }).setColor(0xe74c3c)] }).catch(() => {});
-          }
+          const logch = await client.channels.fetch(LEADERS_LOG_CHANNEL_ID).catch(()=>null);
+          if (logch && logch.isTextBased()) await logch.send({ embeds: [new EmbedBuilder().setTitle('📕 Отклонение').addFields({ name: 'Лидер', value: `<@${interaction.user.id}>` }, { name: 'Причина', value: reason }).setColor(0xe74c3c)] }).catch(()=>{});
         }
-        await interaction.reply({ content: 'Application rejected.', ephemeral: true });
+        await interaction.reply({ content: 'Отклонено.', ephemeral: true });
         return;
       }
 
-      // application modal submit (family / restore / unblack)
       if (interaction.customId.startsWith('apply_modal_')) {
         const type = interaction.customId.replace('apply_modal_', '');
         const yourName = interaction.fields.getTextInputValue('your_name');
         const discord = interaction.fields.getTextInputValue('discord');
-        const ic = interaction.fields.getTextInputValue('ic');
+        const ic = interaction.fields.getTextInputValue('ic_name');
         const history = interaction.fields.getTextInputValue('history');
         const motivation = interaction.fields.getTextInputValue('motivation');
 
         // basic validation
         const errors = [];
-        if (!yourName || yourName.length < 2) errors.push('Имя слишком короткое.');
-        if (!discord || (!discord.includes('#') && !discord.includes('@'))) errors.push('Discord указан неверно.');
-        if (!ic || ic.length < 3) errors.push('IC слишком короткое.');
-        if (!history || history.length < 6) errors.push('История слишком короткая.');
-        if (!motivation || motivation.length < 6) errors.push('Мотивация слишком короткая.');
+        if (yourName.length < 2) errors.push('Имя слишком короткое.');
+        if (!discord || discord.length < 3) errors.push('Discord указан неверно.');
+        if (ic.length < 3) errors.push('IC слишком короткое.');
+        if (history.length < 6) errors.push('История слишком короткая.');
+        if (motivation.length < 6) errors.push('Мотивация слишком короткая.');
 
         if (errors.length) {
           await interaction.reply({ content: '❌ Ошибки:\n' + errors.map(e => `• ${e}`).join('\n'), ephemeral: true });
@@ -427,77 +376,190 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         const emb = new EmbedBuilder()
-          .setTitle(type === 'family' ? '📩 Заявка на вступление' : type === 'restore' ? '📩 Заявка — восстановление' : '📩 Заявка — снятие ЧС')
+          .setTitle(type === 'family' ? '📩 Заявка — вступление' : type === 'restore' ? '📩 Заявка — восстановление' : '📩 Снятие ЧС')
           .setColor(0x7b68ee)
           .addFields(
             { name: 'Имя (OOC)', value: yourName },
             { name: 'Discord', value: discord },
-            { name: 'IC данные', value: ic },
+            { name: 'IC', value: ic },
             { name: 'История', value: history },
             { name: 'Мотивация', value: motivation }
-          )
-          .setFooter({ text: 'Заявка' })
-          .setTimestamp();
+          );
 
+        // Forum channel: create thread message
         if (!APP_CHANNEL_ID) {
-          await interaction.reply({ content: 'APP_CHANNEL_ID not set.', ephemeral: true });
+          await interaction.reply({ content: 'APP_CHANNEL_ID не задан в .env', ephemeral: true });
           return;
         }
-        const forum = await client.channels.fetch(APP_CHANNEL_ID).catch(() => null);
+        const forum = await client.channels.fetch(APP_CHANNEL_ID).catch(()=>null);
         if (!forum) {
-          await interaction.reply({ content: 'Cannot find applications channel.', ephemeral: true });
+          await interaction.reply({ content: 'Канал заявок не найден (проверь ID).', ephemeral: true });
           return;
         }
 
-        // try forum thread creation (forum channels support threads.create({...}))
+        // create forum post / thread
         try {
-          if (forum.threads && typeof forum.threads.create === 'function') {
-            const thread = await forum.threads.create({
-              name: `Заявка — ${yourName}`,
-              message: {
-                content: ALLOWED_ROLE_IDS.map(r => `<@&${r}>`).join(' '),
-                embeds: [emb],
-                components: [
-                  new ActionRowBuilder().addComponents(
-                    new ButtonBuilder().setCustomId(`accept_${interaction.user.id}`).setLabel('Принять').setStyle(ButtonStyle.Success),
-                    new ButtonBuilder().setCustomId(`deny_${interaction.user.id}`).setLabel('Отклонить').setStyle(ButtonStyle.Danger)
-                  )
-                ]
-              }
-            });
-            // optional: send short confirmation in thread
-            await interaction.reply({ content: 'Заявка отправлена!', ephemeral: true });
-            return;
-          } else {
-            // fallback: send message and start thread if allowed
-            const sent = await forum.send({ content: ALLOWED_ROLE_IDS.map(r => `<@&${r}>`).join(' '), embeds: [emb] }).catch(() => null);
-            if (sent && sent.startThread) {
-              try { await sent.startThread({ name: `Заявка — ${yourName}` }); } catch {}
+          const thread = await forum.threads.create({
+            name: `Заявка — ${yourName}`,
+            message: {
+              content: ALLOWED_ROLE_IDS.map(r => `<@&${r}>`).join(' '),
+              embeds: [emb],
+              components: [ new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId(`accept_${interaction.user.id}`).setLabel('Принять').setStyle(ButtonStyle.Success),
+                new ButtonBuilder().setCustomId(`deny_${interaction.user.id}`).setLabel('Отклонить').setStyle(ButtonStyle.Danger)
+              )]
             }
-            await interaction.reply({ content: 'Заявка отправлена (fallback).', ephemeral: true });
-            return;
-          }
-        } catch (err) {
-          console.error('Failed to post application:', err);
-          await interaction.reply({ content: 'Error posting application. Check bot permissions and channel type.', ephemeral: true });
-          return;
+          });
+          await interaction.reply({ content: 'Заявка отправлена в форум.', ephemeral: true });
+        } catch (e) {
+          console.error('Create thread error:', e);
+          await interaction.reply({ content: 'Не удалось создать в форуме (проверь права/канал).', ephemeral: true });
         }
+        return;
       }
     }
+
   } catch (err) {
-    console.error('Interaction handler error:', err);
-    try { if (interaction && !interaction.replied) await interaction.reply({ content: 'Произошла ошибка.', ephemeral: true }); } catch {}
+    console.error('Interaction error:', err);
+    try {
+      if (interaction && !interaction.replied) await interaction.reply({ content: 'Произошла ошибка, администратор уведомлён.', ephemeral: true });
+    } catch {}
   }
 });
 
-// ---------------------- START ----------------------
-client.login(DISCORD_TOKEN).catch(err => {
-  console.error('Failed to login:', err);
-  process.exit(1);
+// -------------------------------
+//  Web panel (express) — minimal
+// -------------------------------
+const app = express();
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+app.use(cookieParser());
+app.use(session({
+  secret: SESSION_SECRET || 'versize_secret_key',
+  resave: false,
+  saveUninitialized: false,
+  cookie: { maxAge: 1000*60*60*12 }
+}));
+
+// OAuth URL (for login button) — make sure OAUTH_REDIRECT_URI set
+const DISCORD_OAUTH_URL = `https://discord.com/api/oauth2/authorize?client_id=${CLIENT_ID}&redirect_uri=${encodeURIComponent(OAUTH_REDIRECT_URI || 'http://localhost:8080/oauth/callback')}&response_type=code&scope=identify%20guilds%20guilds.members.read`;
+
+// requireAuth middleware simplified (uses tokens store)
+global.oauthTokens = {};
+
+async function requireAuth(req, res, next) {
+  if (!req.session.user) return res.redirect('/login');
+  // option: verify membership
+  next();
+}
+
+app.get('/login', (req, res) => {
+  res.send(`<html><body style="font-family:Arial;background:#0d0b16;color:#fff;padding:50px"><h1>Versize Panel</h1><a href="${DISCORD_OAUTH_URL}" style="background:#7b68ee;padding:12px 20px;border-radius:8px;color:#fff;text-decoration:none">Войти через Discord</a></body></html>`);
 });
 
-// Minimal express health endpoint (optional)
-const app = express();
-app.get('/', (_req, res) => res.send('Versize bot running'));
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`HTTP server listening on ${port}`));
+app.get('/oauth/callback', async (req, res) => {
+  const code = req.query.code;
+  if (!code) return res.send('No code');
+  try {
+    const params = new URLSearchParams();
+    params.append('client_id', CLIENT_ID);
+    params.append('client_secret', CLIENT_SECRET);
+    params.append('grant_type', 'authorization_code');
+    params.append('code', code);
+    params.append('redirect_uri', OAUTH_REDIRECT_URI);
+
+    const tokenRes = await fetch('https://discord.com/api/oauth2/token', { method: 'POST', body: params, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }});
+    const tokenData = await tokenRes.json();
+    if (!tokenData.access_token) return res.send('Auth failed');
+
+    const userRes = await fetch('https://discord.com/api/users/@me', { headers: { Authorization: `Bearer ${tokenData.access_token}` }});
+    const userData = await userRes.json();
+    global.oauthTokens[userData.id] = tokenData.access_token;
+    req.session.user = { id: userData.id, username: userData.username, avatar: userData.avatar };
+    res.redirect('/panel');
+  } catch (e) {
+    console.error('OAuth callback error', e);
+    res.send('OAuth error');
+  }
+});
+
+app.get('/panel', requireAuth, (req, res) => {
+  res.send(`<html><body style="font-family:Arial;background:#0d0b16;color:#fff;padding:20px"><h1>Panel</h1><p>Welcome ${req.session.user.username}</p><p><a href="/panel/applications" style="color:#7b68ee">Applications</a></p><p><a href="/logout">Logout</a></p></body></html>`);
+});
+
+app.get('/panel/applications', requireAuth, async (req, res) => {
+  if (!APP_CHANNEL_ID) return res.send('APP_CHANNEL_ID not set');
+  const forum = await client.channels.fetch(APP_CHANNEL_ID).catch(()=>null);
+  if (!forum) return res.send('Forum channel not found');
+  const threads = await forum.threads.fetchActive().catch(()=>null);
+  let rows = '';
+  if (threads && threads.threads) {
+    for (const [id, t] of threads.threads) {
+      rows += `<tr><td>${t.name}</td><td>${t.ownerId ? `<@${t.ownerId}>` : '-'}</td><td>${new Date(t.createdAt).toLocaleString()}</td><td><a href="/api/thread/accept?id=${t.id}">Accept</a> | <a href="/api/thread/deny?id=${t.id}">Deny</a></td></tr>`;
+    }
+  }
+  res.send(`<html><body style="font-family:Arial;background:#0d0b16;color:#fff;padding:20px"><h1>Applications</h1><table border="0" cellpadding="8" style="color:#fff"><tr><th>Name</th><th>Owner</th><th>Created</th><th>Actions</th></tr>${rows}</table><p><a href="/panel">Back</a></p></body></html>`);
+});
+
+app.get('/api/thread/accept', requireAuth, async (req, res) => {
+  const id = req.query.id;
+  if (!id) return res.send('id missing');
+  try {
+    const thread = await client.channels.fetch(id);
+    if (!thread.isThread()) return res.send('not thread');
+    await thread.send({ embeds: [ new EmbedBuilder().setTitle('✅ Одобрено (panel)').setDescription(`Лидер: ${req.session.user.username}`).setColor(0x2ecc71) ] }).catch(()=>{});
+    await thread.setArchived(true).catch(()=>{});
+    if (LEADERS_LOG_CHANNEL_ID) {
+      const lch = await client.channels.fetch(LEADERS_LOG_CHANNEL_ID).catch(()=>null);
+      if (lch && lch.isTextBased()) await lch.send({ embeds: [ new EmbedBuilder().setTitle('📗 Одобрено (WEB)').addFields({ name: 'Leader', value: req.session.user.username}, { name: 'Thread', value: thread.name}).setColor(0x2ecc71) ] }).catch(()=>{});
+    }
+    res.redirect('/panel/applications');
+  } catch (e) {
+    console.error('accept api error', e);
+    res.send('error');
+  }
+});
+
+app.get('/api/thread/deny', requireAuth, async (req, res) => {
+  const id = req.query.id;
+  if (!id) return res.send('id missing');
+  if (!req.query.reason) {
+    return res.send(`<form><input type="hidden" name="id" value="${id}"><textarea name="reason" style="width:400px;height:120px"></textarea><br><button>Send</button></form>`);
+  }
+  const reason = req.query.reason;
+  try {
+    const thread = await client.channels.fetch(id);
+    await thread.send({ embeds: [ new EmbedBuilder().setTitle('❌ Отклонено (panel)').addFields({ name: 'Leader', value: req.session.user.username }, { name: 'Reason', value: reason}).setColor(0xe74c3c) ] }).catch(()=>{});
+    await thread.setArchived(true).catch(()=>{});
+    if (LEADERS_LOG_CHANNEL_ID) {
+      const lch = await client.channels.fetch(LEADERS_LOG_CHANNEL_ID).catch(()=>null);
+      if (lch && lch.isTextBased()) await lch.send({ embeds: [ new EmbedBuilder().setTitle('📕 Отклонено (WEB)').addFields({ name: 'Leader', value: req.session.user.username }, { name: 'Reason', value: reason }).setColor(0xe74c3c) ] }).catch(()=>{});
+    }
+    res.redirect('/panel/applications');
+  } catch (e) {
+    console.error('deny api error', e);
+    res.send('error');
+  }
+});
+
+app.get('/logout', (req, res) => {
+  req.session.destroy(()=>res.redirect('/login'));
+});
+
+// -------------------------------
+//  Startup
+// -------------------------------
+const serverPort = PORT || 8080;
+app.listen(serverPort, () => {
+  console.log(`🌐 Versize Web Panel запущена на порту: ${serverPort}`);
+  if (process.env.RAILWAY_ENVIRONMENT) console.log('Running on Railway');
+});
+
+// Register commands then login
+registerCommands().then(()=> {
+  client.login(DISCORD_TOKEN).catch(err => console.error('Discord login error', err));
+});
+
+client.once(Events.ClientReady, () => {
+  console.log('Logged in as', client.user.tag);
+});

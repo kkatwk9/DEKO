@@ -10,26 +10,31 @@ const {
   GUILD_ID
 } = process.env;
 
+// DEBUG: выводим проверку env
+console.log('>>> register-commands: ENV CHECK');
+console.log('DISCORD_TOKEN present:', !!DISCORD_TOKEN);
+console.log('CLIENT_ID present:', !!CLIENT_ID, 'value:', CLIENT_ID ? CLIENT_ID.slice(0,8) + '...' : '<empty>');
+console.log('GUILD_ID present:', !!GUILD_ID, 'value:', GUILD_ID ? GUILD_ID.slice(0,8) + '...' : '<empty>');
+console.log('---');
+
 if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID) {
-  console.error('DISCORD_TOKEN, CLIENT_ID и GUILD_ID обязательны в .env');
+  console.error('ERROR: DISCORD_TOKEN, CLIENT_ID and GUILD_ID must be set in environment variables.');
   process.exit(1);
 }
 
+// Build commands array (same commands as in index.js)
 const commands = [
-  // apply-panel
   new SlashCommandBuilder()
     .setName('apply-panel')
     .setDescription('Опубликовать панель заявок'),
 
-  // embed
   new SlashCommandBuilder()
     .setName('embed')
     .setDescription('Создать эмбэд')
     .addStringOption(o => o.setName('title').setDescription('Заголовок').setRequired(true))
     .addStringOption(o => o.setName('description').setDescription('Текст').setRequired(true))
-    .addStringOption(o => o.setName('color').setDescription('Цвет #hex например #ff66aa').setRequired(false)),
+    .addStringOption(o => o.setName('color').setDescription('Цвет #hex (например #ff66aa)').setRequired(false)),
 
-  // audit
   new SlashCommandBuilder()
     .setName('audit')
     .setDescription('Создать запись аудита')
@@ -66,7 +71,6 @@ const commands = [
     ))
     .addStringOption(o => o.setName('reason').setDescription('Причина').setRequired(false)),
 
-  // blacklist (subcommands add/remove/list)
   new SlashCommandBuilder()
     .setName('blacklist')
     .setDescription('Управление черным списком (ЧС)')
@@ -86,12 +90,19 @@ const commands = [
 ].map(c => c.toJSON());
 
 (async () => {
+  const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+
   try {
-    const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
-    console.log('Registering slash commands to guild', GUILD_ID);
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-    console.log('Slash commands registered successfully.');
+    console.log('Registering commands to guild:', GUILD_ID);
+    const res = await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+    console.log('Registration result: OK. Registered', res.length, 'commands.');
+    process.exit(0);
   } catch (err) {
     console.error('Failed to register commands:', err);
+    // show a small hint for common errors
+    if (err?.status === 401) console.error('401 Unauthorized — check DISCORD_TOKEN');
+    if (err?.status === 403) console.error('403 Forbidden — check bot permissions / OAuth invite scopes');
+    if (err?.status === 404) console.error('404 Not Found — check CLIENT_ID and GUILD_ID are correct');
+    process.exit(1);
   }
 })();

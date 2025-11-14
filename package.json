@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Discord bot for Versize - forum-based applications",
   "main": "index.js",
-  "type": "module",
+  "type": "commonjs",
   "scripts": {
     "start": "node index.js"
   },

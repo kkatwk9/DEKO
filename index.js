@@ -2,6 +2,24 @@
 //  V E R S I Z E   B O T   —   ЧАСТЬ 1 (Discord Core)
 // ================================================================
 import 'dotenv/config';
+// TEMP: FULL COMMAND RESET
+import { REST } from '@discordjs/rest';
+import { Routes } from 'discord-api-types/v10';
+
+(async () => {
+  try {
+    const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
+    await rest.put(
+      Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
+      { body: [] }
+    );
+
+    console.log("❌ ВСЕ КОМАНДЫ УДАЛЕНЫ (RESET)");
+  } catch (err) {
+    console.error("Ошибка во время reset:", err);
+  }
+})();
+
 import express from 'express';
 import fetch from 'node-fetch';
 import cookieParser from 'cookie-parser';
